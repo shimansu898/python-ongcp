@@ -1,0 +1,145 @@
+Step 1: Set Up Google Cloud Environment
+1. Create GCS Buckets:
+• Create a source bucket for encrypted files.
+• Create a landing zone bucket for decrypted files.
+2. Enable Required APIs:
+• Enable Cloud Run, Cloud Storage, Secret Manager, and BigQuery APIs.
+Step 2: Create and Store PGP Private Key
+3. Generate PGP Key Pair:
+• Use a tool like GPG to generate a PGP key pair.
+• Export the private key.
+4. Store Private Key in Secret Manager:
+• Store the PGP private key in Secret Manager for secure access.
+Step 3: Develop the Cloud Run Service
+5. Set Up the Project Structure:
+• Create a new directory for your project.
+• Set up a virtual environment and install necessary dependencies.
+6. Write the Python Code:
+• Create a main.py file with the following code:
+import os
+import gnupg
+from google.cloud import storage, secretmanager, bigquery
+# Initialize clients
+storage_client = storage.Client()
+secret_client = secretmanager.SecretManagerServiceClient()
+bq_client = bigquery.Client()
+# Configuration
+SOURCE_BUCKET = 'your-source-bucket'
+LANDING_BUCKET = 'your-landing-bucket'
+SECRET_NAME = 'projects/your-project/secrets/your-secret/versions/latest'
+def download_file(bucket_name, source_blob_name, destination_file_name):
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(source_blob_name)
+    blob.download_to_filename(destination_file_name)
+def upload_file(bucket_name, source_file_name, destination_blob_name):
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(destination_blob_name)
+    blob.upload_from_filename(source_file_name)
+def delete_file(bucket_name, blob_name):
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+    blob.delete()
+def get_secret(secret_name):
+    response = secret_client.access_secret_version(name=secret_name)
+    return response.payload.data.decode('UTF-8')
+def decrypt_file(encrypted_file, decrypted_file, private_key):
+    gpg = gnupg.GPG()
+    with open(encrypted_file, 'rb') as f:
+        status = gpg.decrypt_file(f, output=decrypted_file, passphrase=private_key)
+    return status.ok
+def load_to_bigquery(file_path, dataset_id, table_id):
+    table_ref = bq_client.dataset(dataset_id).table(table_id)
+    job_config = bigquery.LoadJobConfig(source_format=bigquery.SourceFormat.CSV)
+    with open(file_path, 'rb') as source_file:
+        job = bq_client.load_table_from_file(source_file, table_ref, job_config=job_config)
+    job.result()
+def main(event, context):
+    file_name = event['name']
+    encrypted_file = f'/tmp/{file_name}'
+    decrypted_file = f'/tmp/decrypted_{file_name}'
+# Download the encrypted file
+    download_file(SOURCE_BUCKET, file_name, encrypted_file)
+# Get the private key from Secret Manager
+    private_key = get_secret(SECRET_NAME)
+# Decrypt the file
+    if decrypt_file(encrypted_file, decrypted_file, private_key):
+        # Upload the decrypted file to the landing bucket
+        upload_file(LANDING_BUCKET, decrypted_file, file_name)
+# Load the decrypted file to BigQuery
+        load_to_bigquery(decrypted_file, 'your_dataset', 'your_table')
+# Delete the encrypted file from the source bucket
+        delete_file(SOURCE_BUCKET, file_name)
+    else:
+        print('Decryption failed')
+if __name__ == '__main__':
+    main()
+Step 4: Deploy the Cloud Run Service
+7. Create a Dockerfile:
+• Create a Dockerfile in the project directory:
+FROM python:3.9-slim
+WORKDIR /app
+COPY requirements.txt requirements.txt
+RUN pip install -r requirements.txt
+COPY . .
+CMD ["python", "main.py"]
+8. Build and Deploy:
+• Build the Docker image and deploy it to Cloud Run:
+gcloud builds submit --tag gcr.io/your-project/your-service
+gcloud run deploy your-service --image gcr.io/your-project/your-service --platform managed
+Step 5: Set Up Cloud Storage Trigger
+9. Create a Cloud Storage Trigger:
+• Set up a Cloud Storage trigger to invoke the Cloud Run service when a new file is uploaded to the source bucket.
+Step 6: Test the Solution
+10. Upload an Encrypted File:
+• Upload an encrypted file to the source bucket and verify the entire process.
+This solution ensures that the Cloud Run service is triggered by new file uploads, decrypts the file securely, and loads the data into BigQuery. Let me know if you need any further assistance!
+
+Copy
+
+AI-generated content may be incorrect
+You said:
+
+can you elaborate more about 
+Step 5: Set Up Cloud Storage Trigger
+Create a Cloud Storage Trigger:
+Set up a Cloud Storage trigger to invoke the Cloud Run service when a new file is uploaded to the source bucket.
+Copilot said:
+
+Jira Cloud
+Certainly! Setting up a Cloud Storage trigger involves configuring Google Cloud Storage to automatically invoke your Cloud Run service whenever a new file is uploaded to a specific bucket. Here’s a detailed explanation of how to achieve this:
+Step 5: Set Up Cloud Storage Trigger
+1. Create a Pub/Sub Topic
+First, you need to create a Pub/Sub topic that will be used to relay events from Cloud Storage to Cloud Run.
+11. Navigate to Pub/Sub in Google Cloud Console:
+• Go to the Pub/Sub section in the Google Cloud Console.
+• Click on "Create Topic".
+• Give your topic a name, e.g., gcs-file-upload-topic.
+2. Configure Cloud Storage to Publish Events to Pub/Sub
+Next, configure your Cloud Storage bucket to publish events to the Pub/Sub topic you just created.
+12. Navigate to Cloud Storage in Google Cloud Console:
+• Go to the Cloud Storage section in the Google Cloud Console.
+• Select the source bucket where encrypted files will be uploaded.
+13. Set Up Notifications:
+• Click on the "Notifications" tab.
+• Click "Create Notification".
+• Select the event type as Object Finalize (this event is triggered when a new file is uploaded and finalized in the bucket).
+• Choose the Pub/Sub topic you created earlier (gcs-file-upload-topic).
+• Save the notification.
+3. Create a Cloud Run Service
+Ensure you have your Cloud Run service deployed as described in the previous steps.
+4. Create a Pub/Sub Subscription
+Create a subscription to the Pub/Sub topic that will trigger the Cloud Run service.
+14. Navigate to Pub/Sub in Google Cloud Console:
+• Go to the Pub/Sub section in the Google Cloud Console.
+• Click on the topic you created (gcs-file-upload-topic).
+• Click "Create Subscription".
+• Give your subscription a name, e.g., gcs-file-upload-subscription.
+15. Configure the Subscription:
+• Choose the delivery type as Push.
+• Enter the URL of your Cloud Run service as the endpoint. This URL can be found in the Cloud Run section of the Google Cloud Console after deploying your service.
+• Save the subscription.
+5. Test the Trigger
+To ensure everything is set up correctly, upload an encrypted file to the source bucket and verify that the Cloud Run service is triggered, decrypts the file, and processes it as expected.
+Summary
+By following these steps, you set up a Cloud Storage trigger that automatically invokes your Cloud Run service whenever a new file is uploaded to the designated bucket. This ensures seamless integration and automation of the decryption and loading process into BigQuery.
+Let me know if you need any further assistance or have any questions!
