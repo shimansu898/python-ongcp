@@ -1,0 +1,113 @@
+import os
+import logging
+import tempfile
+import gnupg
+from google.cloud import storage, secretmanager, bigquery
+
+# Initialize clients
+storage_client = storage.Client()
+secret_client = secretmanager.SecretManagerServiceClient()
+bq_client = bigquery.Client()
+
+# Configuration
+SOURCE_BUCKET = 'your-source-bucket'
+LANDING_BUCKET = 'your-landing-bucket'
+SECRET_NAME = 'projects/your-project/secrets/your-secret/versions/latest'
+DATASET_ID = 'your_dataset'
+TABLE_ID = 'your_table'
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+
+def download_file(bucket_name, source_blob_name, destination_file_name):
+    try:
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(source_blob_name)
+        blob.download_to_filename(destination_file_name)
+        logging.info(f"Downloaded {source_blob_name} from {bucket_name} to {destination_file_name}")
+    except Exception as e:
+        logging.error(f"Error downloading file: {e}")
+        raise
+
+def upload_file(bucket_name, source_file_name, destination_blob_name):
+    try:
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(destination_blob_name)
+        blob.upload_from_filename(source_file_name)
+        logging.info(f"Uploaded {source_file_name} to {bucket_name}/{destination_blob_name}")
+    except Exception as e:
+        logging.error(f"Error uploading file: {e}")
+        raise
+
+def delete_file(bucket_name, blob_name):
+    try:
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+        blob.delete()
+        logging.info(f"Deleted {blob_name} from {bucket_name}")
+    except Exception as e:
+        logging.error(f"Error deleting file: {e}")
+        raise
+
+def get_secret(secret_name):
+    try:
+        response = secret_client.access_secret_version(name=secret_name)
+        secret = response.payload.data.decode('UTF-8')
+        logging.info("Successfully retrieved secret")
+        return secret
+    except Exception as e:
+        logging.error(f"Error retrieving secret: {e}")
+        raise
+
+def decrypt_file(encrypted_file, decrypted_file, private_key):
+    try:
+        with tempfile.TemporaryDirectory() as gpg_home:
+            gpg = gnupg.GPG(gnupghome=gpg_home)
+            with open(encrypted_file, 'rb') as f:
+                status = gpg.decrypt_file(f, output=decrypted_file, passphrase=private_key)
+        
+        if status.ok:
+            logging.info("Decryption successful")
+            return True
+        else:
+            logging.error("Decryption failed")
+            return False
+    except Exception as e:
+        logging.error(f"Error during decryption: {e}")
+        return False
+
+def load_to_bigquery(file_path, dataset_id, table_id):
+    try:
+        table_ref = bq_client.dataset(dataset_id).table(table_id)
+        job_config = bigquery.LoadJobConfig(
+            source_format=bigquery.SourceFormat.CSV,
+            autodetect=True,  # Automatically detect schema
+            skip_leading_rows=1
+        )
+        with open(file_path, 'rb') as source_file:
+            job = bq_client.load_table_from_file(source_file, table_ref, job_config=job_config)
+        job.result()
+        logging.info(f"Loaded data from {file_path} to BigQuery {dataset_id}.{table_id}")
+    except Exception as e:
+        logging.error(f"Error loading data to BigQuery: {e}")
+        raise
+
+def main(event, context):
+    file_name = event['name']
+    logging.info(f"Processing file: {file_name}")
+
+    encrypted_file = f'/tmp/{file_name}'
+    decrypted_file = f'/tmp/decrypted_{file_name}'
+
+    try:
+        download_file(SOURCE_BUCKET, file_name, encrypted_file)
+        private_key = get_secret(SECRET_NAME)
+
+        if decrypt_file(encrypted_file, decrypted_file, private_key):
+            upload_file(LANDING_BUCKET, decrypted_file, file_name)
+            load_to_bigquery(decrypted_file, DATASET_ID, TABLE_ID)
+            delete_file(SOURCE_BUCKET, file_name)
+        else:
+            logging.error("Decryption failed, skipping file processing")
+    except Exception as e:
+        logging.error(f"Error processing file {file_name}: {e}")
