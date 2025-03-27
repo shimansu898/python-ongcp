@@ -1,0 +1,115 @@
+import os
+import logging
+import tempfile
+import datetime
+import gnupg
+from datetime import datetime
+from google.cloud import storage, secretmanager, bigquery
+
+print("*********Function Started****************")
+# Initialize clients
+storage_client = storage.Client()
+secret_client = secretmanager.SecretManagerServiceClient()
+bq_client = bigquery.Client()
+now = datetime.now()
+
+# Configuration
+PROJECT_NAME = 'vf-mc2dev-ca-nonlive'
+SOURCE_BUCKET = 'vf-mc2dev-ca-nonlive-test-data'
+LANDING_BUCKET = 'vf-mc2dev-ca-nonlive-temp-etl'
+SECRET = 'test_enc_file'
+VERSION = '1'
+DATASET_ID = 'vfmc2dev_mc2_nonlive_mc2devlake_mc2_rawprepared_s'
+TABLE_ID = 'test_dropme'
+Encrpt_file_name = 'test.csv.gpg'
+
+decrpt_file_name = "decrypted_" + now.strftime("%Y%m%d%H%M%S") + ".csv"
+SECRET_NAME = f'projects/{PROJECT_NAME}/secrets/{SECRET}/versions/{VERSION}'
+table_id = f'{PROJECT_NAME}.{DATASET_ID}.{TABLE_ID}'
+uri = "gs://" + f'{LANDING_BUCKET}/{decrpt_file_name}'
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+
+def download_file(bucket_name, source_blob_name, destination_file_name):
+    try:
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(source_blob_name)
+        blob.download_to_filename(destination_file_name)
+        logging.info(f"Downloaded Encrypted file {source_blob_name} from GCS bucket {bucket_name} to temp location {destination_file_name}")
+    except Exception as e:
+        logging.error(f"Error downloading file: {e}")
+        raise
+
+def decrypt_file(encrypted_file_path, decrypted_file_path, secret_name):
+    try:
+        # Access the secret key from Secret Manager
+        response = secret_client.access_secret_version(request={"name": secret_name})
+        private_key = response.payload.data.decode("UTF-8")
+        # Initialize GPG with the secret key
+        gpg = gnupg.GPG()
+        gpg.import_keys(private_key)
+        # Decrypt the file
+        with open(encrypted_file_path, 'rb') as f:
+            status = gpg.decrypt_file(f, output=decrypted_file_path)
+        if status.ok:
+            logging.info('File decrypted successfully')
+        else:
+            logging.error('Decryption failed:', status.stderr)
+            raise Exception('Decryption failed')
+    except Exception as e:
+        logging.error(f"Error decrypting file: {e}")
+        raise
+
+def upload_file(bucket_name, source_file_name, destination_blob_name):
+    try:
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(destination_blob_name)
+        blob.upload_from_filename(source_file_name)
+        logging.info(f"Uploaded Decrypted file {source_file_name} to Destination bucket {bucket_name}/{destination_blob_name}")
+    except Exception as e:
+        logging.error(f"Error uploading file: {e}")
+        raise
+    
+def load_to_bigquery(uri, table_id):
+    try:
+        job_config = bigquery.LoadJobConfig(
+            schema=[
+                bigquery.SchemaField("name", "STRING"),
+                bigquery.SchemaField("number", "STRING"),
+            ],
+            skip_leading_rows=1,
+            # The source format defaults to CSV, so the line below is optional.
+            source_format=bigquery.SourceFormat.CSV,
+        )
+        load_job = bq_client.load_table_from_uri(uri, table_id, job_config=job_config)  # Make an API request.
+        load_job.result()  # Waits for the job to complete.
+        destination_table = bq_client.get_table(table_id)  # Make an API request.
+        print("Loaded {} rows inserted".format(destination_table.num_rows))
+    except Exception as e:
+        logging.error(f"Error loading data to BigQuery: {e}")
+        raise
+
+def encrypted_delete_file(bucket_name, file_name):
+    try:
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(file_name)
+        blob.delete()
+        print(f' Encrypted File {file_name} deleted from bucket {bucket_name}.')
+    except Exception as e:
+        logging.error(f"Error downloading file: {e}")
+        raise
+
+def checking(arg):
+    try :
+        download_file(SOURCE_BUCKET, Encrpt_file_name, Encrpt_file_name)
+        decrypt_file(Encrpt_file_name, decrpt_file_name, SECRET_NAME)
+        upload_file(LANDING_BUCKET, decrpt_file_name, decrpt_file_name)
+        load_to_bigquery(uri,table_id)
+        #encrypted_delete_file(SOURCE_BUCKET, Encrpt_file_name) # Encryption file deleted
+        print("*********Function Ended****************")
+    except Exception as e:
+        logging.error(f"Error processing file {arg}: {e}")
+        print("*********Function Ended with Error****************")
+checking(Encrpt_file_name)
