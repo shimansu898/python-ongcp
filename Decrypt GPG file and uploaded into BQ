@@ -1,115 +1,239 @@
+#1. Configuration & Imports
+
 import os
+import re
 import logging
 import tempfile
 import datetime
 import gnupg
-from datetime import datetime
-from google.cloud import storage, secretmanager, bigquery
+from datetime import datetime, UTC
+import tempfile
+from google.cloud import secretmanager, storage, bigquery
 
 print("*********Function Started****************")
-# Initialize clients
-storage_client = storage.Client()
+# 2. Configuration
+# GCP Configuration
+PROJECT_ID = "vf-grp-mi-reporting-dev-beta"
+SECRET_NAME = "gpg_private"
+SOURCE_BUCKET_NAME = "vf-grp-mi-reporting-dev-beta-test-data"
+DEST_BUCKET_NAME = "vf-grp-mi-reporting-dev-beta-temp-etl"
+BQ_DATASET = "vf_grp_mi_reporting_dev_beta_mc2_rawprepared_s"
+VERSION = 1
+
+# GPG file patterns
+GPG_FILENAME_PATTERNS = [
+    "Fact_Base_Transform_LIB_REPOrganic_",
+    "Fact_Base_Transform_LIB_REP_BR_",
+    "Fact_Base_Transform_LIB_REP_B_",
+    "Fact_Base_Transform_LIB_REP_E_",
+    "Fact_Base_Transform_LIB_REP_FR_",
+    "Fact_Base_Transform_LIB_REP_F_",
+    "Fact_Base_Transform_RF_Rolling_forecast_"
+]
+# Schemas
+common_schema = [
+                bigquery.SchemaField("Key_Reverse_Map","STRING"),
+                bigquery.SchemaField("CUSTOM1_CD","STRING"),
+                bigquery.SchemaField("TARIFF_SEGMENT_CD","STRING"),
+                bigquery.SchemaField("File_Name","STRING"),
+                bigquery.SchemaField("CALENDAR_MONTH_ID","STRING"),
+                bigquery.SchemaField("MEASURE_VALUE","STRING"),
+                bigquery.SchemaField("NUMERATOR_VALUE","STRING"),
+                bigquery.SchemaField("DENOMINATOR_VALUE","STRING"),
+                bigquery.SchemaField("ACCOUNT_TYPE_INDICATOR","STRING"),
+                bigquery.SchemaField("CHART_OF_ACCNT_CD","STRING"),
+                bigquery.SchemaField("CONSOLIDATION_CD","STRING"),
+                bigquery.SchemaField("CONSOLIDATION_CD_O","STRING"),
+                bigquery.SchemaField("LEGAL_ENTITY_CD","STRING"),
+                bigquery.SchemaField("SCENARIO_CD","STRING"),
+                bigquery.SchemaField("SCENARIO_CD_O","STRING"),
+                bigquery.SchemaField("ICP_ENTITY_CD","STRING"),
+                bigquery.SchemaField("MEASURE_CD","STRING"),
+                bigquery.SchemaField("VIEW_CD","STRING"),
+                bigquery.SchemaField("FACT_SYSTEM_FLAG","STRING"),
+                bigquery.SchemaField("CUSTOM3_CD","STRING"),
+                bigquery.SchemaField("ACCOUNT_TYPE","STRING"),
+                bigquery.SchemaField("VERSION","STRING"),
+                bigquery.SchemaField("KPI_KEY","STRING"),
+                bigquery.SchemaField("RUN_ID","STRING"),
+                bigquery.SchemaField("ORGANIC_FLAG","STRING"),
+                bigquery.SchemaField("YEAR","STRING"),
+                bigquery.SchemaField("KEY_DASHBOARD","STRING"),
+
+]
+
+forecast_schema = [
+                bigquery.SchemaField("File_Name","STRING"),
+                bigquery.SchemaField("CALENDAR_MONTH_ID","STRING"),
+                bigquery.SchemaField("MEASURE_VALUE","STRING"),
+                bigquery.SchemaField("NUMERATOR_VALUE","STRING"),
+                bigquery.SchemaField("DENOMINATOR_VALUE","STRING"),
+                bigquery.SchemaField("CHART_OF_ACCNT_CD","STRING"),
+                bigquery.SchemaField("TARIFF_SEGMENT_CD","STRING"),
+                bigquery.SchemaField("CUSTOM1_CD","STRING"),
+                bigquery.SchemaField("CONSOLIDATION_CD","STRING"),
+                bigquery.SchemaField("LEGAL_ENTITY_CD","STRING"),
+                bigquery.SchemaField("SCENARIO_CD","STRING"),
+                bigquery.SchemaField("SCENARIO_CD_O","STRING"),
+                bigquery.SchemaField("ICP_ENTITY_CD","STRING"),
+                bigquery.SchemaField("MEASURE_CD","STRING"),
+                bigquery.SchemaField("VIEW_CD","STRING"),
+                bigquery.SchemaField("FACT_SYSTEM_FLAG","STRING"),
+                bigquery.SchemaField("CUSTOM3_CD","STRING"),
+                bigquery.SchemaField("ACCOUNT_TYPE","STRING"),
+                bigquery.SchemaField("VERSION","STRING"),
+                bigquery.SchemaField("KPI_KEY","STRING"),
+                bigquery.SchemaField("RUN_ID","STRING"),
+                bigquery.SchemaField("KEY_DASHBOARD","STRING"),
+]
+
+extra_fields = [
+    bigquery.SchemaField("inserted_at", "TIMESTAMP"),
+    bigquery.SchemaField("source_file", "STRING"),
+]
+
+#3. Client Setup & Get Secret
+# Set project ID for auth
+os.environ["GOOGLE_CLOUD_PROJECT"] = PROJECT_ID
+# Clients
 secret_client = secretmanager.SecretManagerServiceClient()
+storage_client = storage.Client()
 bq_client = bigquery.Client()
-now = datetime.now()
 
-# Configuration
-PROJECT_NAME = 'vf-mc2dev-ca-nonlive'
-SOURCE_BUCKET = 'vf-mc2dev-ca-nonlive-test-data'
-LANDING_BUCKET = 'vf-mc2dev-ca-nonlive-temp-etl'
-SECRET = 'test_enc_file'
-VERSION = '1'
-DATASET_ID = 'vfmc2dev_mc2_nonlive_mc2devlake_mc2_rawprepared_s'
-TABLE_ID = 'test_dropme'
-Encrpt_file_name = 'test.csv.gpg'
+def get_private_key(secret_name):
+    secret_path = f"projects/{PROJECT_ID}/secrets/{secret_name}/versions/{VERSION}"
+    response = secret_client.access_secret_version(request={"name": secret_path})
+    return response.payload.data.decode("UTF-8")
 
-decrpt_file_name = "decrypted_" + now.strftime("%Y%m%d%H%M%S") + ".csv"
-SECRET_NAME = f'projects/{PROJECT_NAME}/secrets/{SECRET}/versions/{VERSION}'
-table_id = f'{PROJECT_NAME}.{DATASET_ID}.{TABLE_ID}'
-uri = "gs://" + f'{LANDING_BUCKET}/{decrpt_file_name}'
+# 4. Decrypt GPG File
+def decrypt_gpg_file(blob, private_key):
+    local_encrypted = os.path.join(tempfile.gettempdir(), blob.name)
+    blob.download_to_filename(local_encrypted)
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
+    gpg = gnupg.GPG()
+    gpg.import_keys(private_key)
 
-def download_file(bucket_name, source_blob_name, destination_file_name):
-    try:
-        bucket = storage_client.bucket(bucket_name)
-        blob = bucket.blob(source_blob_name)
-        blob.download_to_filename(destination_file_name)
-        logging.info(f"Downloaded Encrypted file {source_blob_name} from GCS bucket {bucket_name} to temp location {destination_file_name}")
-    except Exception as e:
-        logging.error(f"Error downloading file: {e}")
-        raise
-
-def decrypt_file(encrypted_file_path, decrypted_file_path, secret_name):
-    try:
-        # Access the secret key from Secret Manager
-        response = secret_client.access_secret_version(request={"name": secret_name})
-        private_key = response.payload.data.decode("UTF-8")
-        # Initialize GPG with the secret key
-        gpg = gnupg.GPG()
-        gpg.import_keys(private_key)
-        # Decrypt the file
-        with open(encrypted_file_path, 'rb') as f:
-            status = gpg.decrypt_file(f, output=decrypted_file_path)
-        if status.ok:
-            logging.info('File decrypted successfully')
-        else:
-            logging.error('Decryption failed:', status.stderr)
-            raise Exception('Decryption failed')
-    except Exception as e:
-        logging.error(f"Error decrypting file: {e}")
-        raise
-
-def upload_file(bucket_name, source_file_name, destination_blob_name):
-    try:
-        bucket = storage_client.bucket(bucket_name)
-        blob = bucket.blob(destination_blob_name)
-        blob.upload_from_filename(source_file_name)
-        logging.info(f"Uploaded Decrypted file {source_file_name} to Destination bucket {bucket_name}/{destination_blob_name}")
-    except Exception as e:
-        logging.error(f"Error uploading file: {e}")
-        raise
+    local_decrypted = local_encrypted.replace(".gpg", "")
     
-def load_to_bigquery(uri, table_id):
-    try:
-        job_config = bigquery.LoadJobConfig(
-            schema=[
-                bigquery.SchemaField("name", "STRING"),
-                bigquery.SchemaField("number", "STRING"),
-            ],
-            skip_leading_rows=1,
-            # The source format defaults to CSV, so the line below is optional.
-            source_format=bigquery.SourceFormat.CSV,
-        )
-        load_job = bq_client.load_table_from_uri(uri, table_id, job_config=job_config)  # Make an API request.
-        load_job.result()  # Waits for the job to complete.
-        destination_table = bq_client.get_table(table_id)  # Make an API request.
-        print("Loaded {} rows inserted".format(destination_table.num_rows))
-    except Exception as e:
-        logging.error(f"Error loading data to BigQuery: {e}")
-        raise
+    with open(local_encrypted, "rb") as f:
+        status = gpg.decrypt_file(f, output=local_decrypted)
+    
+    if not status.ok:
+        raise Exception(f"Decryption failed for {blob.name}: {status.status}")
+    
+    return local_decrypted
 
-def encrypted_delete_file(bucket_name, file_name):
-    try:
+# 5. Upload to Destination Bucket
+def upload_csv_to_bucket(file_path, dest_blob_name):
+    bucket = storage_client.bucket(DEST_BUCKET_NAME)
+    blob = bucket.blob(dest_blob_name)
+    blob.upload_from_filename(file_path)
+    print(f"✅ Uploaded to destination bucket: {DEST_BUCKET_NAME}/{dest_blob_name}")
+
+# 5. Delete decrypted csv file
+def delete_csv_file(file_path, dest_blob_name):
         storage_client = storage.Client()
-        bucket = storage_client.bucket(bucket_name)
-        blob = bucket.blob(file_name)
+        bucket = storage_client.bucket(DEST_BUCKET_NAME)
+        blob = bucket.blob(dest_blob_name)
         blob.delete()
-        print(f' Encrypted File {file_name} deleted from bucket {bucket_name}.')
-    except Exception as e:
-        logging.error(f"Error downloading file: {e}")
-        raise
+        print(f'✅ Decrypted CSV File {dest_blob_name} deleted from bucket {DEST_BUCKET_NAME}')
 
-def checking(arg):
-    try :
-        download_file(SOURCE_BUCKET, Encrpt_file_name, Encrpt_file_name)
-        decrypt_file(Encrpt_file_name, decrpt_file_name, SECRET_NAME)
-        upload_file(LANDING_BUCKET, decrpt_file_name, decrpt_file_name)
-        load_to_bigquery(uri,table_id)
-        #encrypted_delete_file(SOURCE_BUCKET, Encrpt_file_name) # Encryption file deleted
-        print("*********Function Ended****************")
+# 6. Load CSV into BigQuery
+def load_csv_to_bigquery(file_path, table_name, schema, source_filename):
+    full_schema = schema + extra_fields
+    now = datetime.now(UTC).isoformat()
+
+    # Add 2 extra columns to each row
+    with open(file_path, "r") as original:
+        lines = original.readlines()
+    
+
+    header = lines[0].strip() + ",inserted_at,source_file\n"
+    data_rows = [line.strip() + f',{now},"{source_filename}"\n' for line in lines[1:]]
+
+    modified_csv = file_path + ".final.csv"
+    with open(modified_csv, "w") as final:
+        final.write(header)
+        final.writelines(data_rows)
+
+    table_id = f"{PROJECT_ID}.{BQ_DATASET}.{table_name}"
+
+    job_config = bigquery.LoadJobConfig(
+        source_format=bigquery.SourceFormat.CSV,
+        skip_leading_rows=1,
+        schema=full_schema,
+        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+    )
+
+    with open(modified_csv, "rb") as f:
+        job = bq_client.load_table_from_file(f, table_id, job_config=job_config)
+    try:
+        job.result()  # Wait for the job to complete
+        print(f"✅ Loaded data into BigQuery: {table_id}")
     except Exception as e:
-        logging.error(f"Error processing file {arg}: {e}")
-        print("*********Function Ended with Error****************")
-checking(Encrpt_file_name)
+        print(f"Error loading data into BigQuery: {e}")
+
+# Function to call a stored procedure
+def call_stored_procedure(sp_name):
+    try:
+        query = f"CALL `{PROJECT_ID}.{BQ_DATASET}.{sp_name}`();"
+        query_job = bq_client.query(query)
+        query_job.result()
+        print(f"✅ Stored Procedure executed: {sp_name} successfully")
+    except Exception as e:
+        print(f"Error executing stored procedure {sp_name}: {e}")
+
+# 7. Archive Original GPG File
+def archive_blob(blob):
+    archive_name = f"archive/{blob.name.split('/')[-1]}"
+    bucket = storage_client.bucket(DEST_BUCKET_NAME)
+    
+    new_blob = bucket.copy_blob(blob, bucket, archive_name)
+    blob.delete()
+    print(f"✅ Archived {blob.name} to {DEST_BUCKET_NAME}/{archive_name}")
+
+# 8. Orchestration (Main Logic)
+private_key = get_private_key(SECRET_NAME)
+source_bucket = storage_client.bucket(SOURCE_BUCKET_NAME)
+
+# Match all .gpg files by patterns
+for blob in source_bucket.list_blobs():
+    if blob.name.endswith(".gpg") and any(p in blob.name for p in GPG_FILENAME_PATTERNS):
+        print(f"\n🔁 Processing: {blob.name}")
+
+        # Decrypt file
+        decrypted_file = decrypt_gpg_file(blob, private_key)
+
+        # Upload decrypted CSV to dest bucket
+        decrypted_filename = os.path.basename(decrypted_file)
+        upload_csv_to_bucket(decrypted_file, decrypted_filename)
+
+        # Determine schema and table name
+        if "Fact_Base_Transform_RF" in blob.name:
+            schema = forecast_schema
+            table_name = "fact_base_transform_rf_rolling_forecast"
+        else:
+            # Remove the 14-digit timestamp before .csv or .csv.gpg
+            name_part = re.sub(r'_\d{14}(?=\.csv(?:\.gpg)?)', '', blob.name)
+
+            # Clean up to get a BQ table name
+            table_name = (
+                name_part.replace(".csv.gpg", "")
+                         .replace(".csv", "")
+                         .lower()
+            )
+
+            schema = common_schema
+
+        # Load to BigQuery
+        load_csv_to_bigquery(decrypted_file, table_name, schema, blob.name)
+        
+        # Archive original GPG
+        archive_blob(blob)
+        # Delete decrypted csv files
+        delete_csv_file(decrypted_file, decrypted_filename)
+
+# Call SP for fact_lib_rep and fact_rf
+call_stored_procedure("sp_fact_rf")
+call_stored_procedure("sp_fact_lip_rep")
+print("*********Function Ended****************")
