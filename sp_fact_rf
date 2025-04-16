@@ -1,0 +1,183 @@
+CREATE OR REPLACE PROCEDURE `vf-grp-mi-reporting-dev-beta.vf_grp_mi_reporting_dev_beta_mc2_rawprepared_s.sp_fact_rf`()
+BEGIN
+  DECLARE project_dataset_id STRING DEFAULT 'vf-grp-mi-reporting-dev-beta.vf_grp_mi_reporting_dev_beta_mc2_rawprepared_s';
+
+  -- Create DDL for Fact table
+  EXECUTE IMMEDIATE FORMAT("""
+    CREATE TABLE IF NOT EXISTS `%s.fact_rf` (
+      File_Name STRING,
+      CALENDAR_MONTH_ID INT64,
+      MEASURE_VALUE NUMERIC,
+      NUMERATOR_VALUE NUMERIC,
+      DENOMINATOR_VALUE NUMERIC,
+      CHART_OF_ACCNT_CD STRING,
+      TARIFF_SEGMENT_CD STRING,
+      CUSTOM1_CD STRING,
+      CONSOLIDATION_CD STRING,
+      LEGAL_ENTITY_CD STRING,
+      SCENARIO_CD STRING,
+      SCENARIO_CD_O STRING,
+      ICP_ENTITY_CD STRING,
+      MEASURE_CD STRING,
+      VIEW_CD STRING,
+      FACT_SYSTEM_FLAG STRING,
+      CUSTOM3_CD STRING,
+      ACCOUNT_TYPE STRING,
+      VERSION STRING,
+      KPI_KEY STRING,
+      RUN_ID INT64,
+      KEY_DASHBOARD STRING,
+      inserted_at TIMESTAMP,
+      source_file STRING,
+      status INT64
+    ) PARTITION BY TIMESTAMP_TRUNC(inserted_at, MONTH)
+  """, project_dataset_id);
+
+  -- Step 1: Clean incoming temp data
+  EXECUTE IMMEDIATE FORMAT("""
+    CREATE OR REPLACE TABLE `%s.temp_cleaned_rolling_forecast` AS
+    SELECT DISTINCT
+      NULLIF(File_Name, '') AS File_Name,
+      IFNULL(CAST(CALENDAR_MONTH_ID AS INT64), 0) AS CALENDAR_MONTH_ID,
+      CAST(NULLIF(MEASURE_VALUE, '') AS NUMERIC) AS MEASURE_VALUE,
+      CAST(NULLIF(NUMERATOR_VALUE, '') AS NUMERIC) AS NUMERATOR_VALUE,
+      CAST(NULLIF(DENOMINATOR_VALUE, '') AS NUMERIC) AS DENOMINATOR_VALUE,
+      NULLIF(CHART_OF_ACCNT_CD, '') AS CHART_OF_ACCNT_CD,
+      NULLIF(TARIFF_SEGMENT_CD, '') AS TARIFF_SEGMENT_CD,
+      NULLIF(CUSTOM1_CD, '') AS CUSTOM1_CD,
+      NULLIF(CONSOLIDATION_CD, '') AS CONSOLIDATION_CD,
+      NULLIF(LEGAL_ENTITY_CD, '') AS LEGAL_ENTITY_CD,
+      NULLIF(SCENARIO_CD, '') AS SCENARIO_CD,
+      NULLIF(SCENARIO_CD_O, '') AS SCENARIO_CD_O,
+      NULLIF(ICP_ENTITY_CD, '') AS ICP_ENTITY_CD,
+      NULLIF(MEASURE_CD, '') AS MEASURE_CD,
+      NULLIF(VIEW_CD, '') AS VIEW_CD,
+      NULLIF(FACT_SYSTEM_FLAG, '') AS FACT_SYSTEM_FLAG,
+      NULLIF(CUSTOM3_CD, '') AS CUSTOM3_CD,
+      NULLIF(ACCOUNT_TYPE, '') AS ACCOUNT_TYPE,
+      NULLIF(VERSION, '') AS VERSION,
+      NULLIF(KPI_KEY, '') AS KPI_KEY,
+      IFNULL(CAST(RUN_ID AS INT64), 0) AS RUN_ID,
+      NULLIF(KEY_DASHBOARD, '') AS KEY_DASHBOARD,
+      inserted_at,
+      source_file
+    FROM `%s.fact_base_transform_rf_rolling_forecast`
+  """, project_dataset_id, project_dataset_id);
+
+  -- Step 2: Merge cleaned data into master table
+  EXECUTE IMMEDIATE FORMAT("""
+    MERGE INTO `%s.fact_rf` AS T
+    USING (
+      SELECT * FROM (
+        SELECT *,
+               ROW_NUMBER() OVER (
+                 PARTITION BY 
+                   CALENDAR_MONTH_ID,
+                   CHART_OF_ACCNT_CD,
+                   TARIFF_SEGMENT_CD,
+                   CUSTOM1_CD,
+                   LEGAL_ENTITY_CD,
+                   SCENARIO_CD_O,
+                   ICP_ENTITY_CD,
+                   MEASURE_CD,
+                   VIEW_CD,
+                   ACCOUNT_TYPE,
+                   VERSION
+               ) AS rn
+        FROM `%s.temp_cleaned_rolling_forecast`
+      )
+      WHERE rn = 1
+    ) AS S
+    ON  T.CALENDAR_MONTH_ID = S.CALENDAR_MONTH_ID AND
+        T.CHART_OF_ACCNT_CD = S.CHART_OF_ACCNT_CD AND
+        T.TARIFF_SEGMENT_CD = S.TARIFF_SEGMENT_CD AND
+        T.CUSTOM1_CD = S.CUSTOM1_CD AND
+        T.LEGAL_ENTITY_CD = S.LEGAL_ENTITY_CD AND
+        T.SCENARIO_CD_O = S.SCENARIO_CD_O AND
+        T.ICP_ENTITY_CD = S.ICP_ENTITY_CD AND
+        T.MEASURE_CD = S.MEASURE_CD AND
+        T.VIEW_CD = S.VIEW_CD AND
+        T.ACCOUNT_TYPE = S.ACCOUNT_TYPE AND
+        T.VERSION = S.VERSION
+
+    WHEN MATCHED THEN
+      UPDATE SET
+        MEASURE_VALUE = S.MEASURE_VALUE,
+        NUMERATOR_VALUE = S.NUMERATOR_VALUE,
+        DENOMINATOR_VALUE = S.DENOMINATOR_VALUE,
+        CONSOLIDATION_CD = S.CONSOLIDATION_CD,
+        SCENARIO_CD = S.SCENARIO_CD,
+        FACT_SYSTEM_FLAG = S.FACT_SYSTEM_FLAG,
+        CUSTOM3_CD = S.CUSTOM3_CD,
+        KPI_KEY = S.KPI_KEY,
+        RUN_ID = S.RUN_ID,
+        KEY_DASHBOARD = S.KEY_DASHBOARD,
+        inserted_at = S.inserted_at,
+        source_file = S.source_file,
+        status = 1
+
+    WHEN NOT MATCHED THEN
+      INSERT (
+        File_Name,
+        CALENDAR_MONTH_ID,
+        MEASURE_VALUE,
+        NUMERATOR_VALUE,
+        DENOMINATOR_VALUE,
+        CHART_OF_ACCNT_CD,
+        TARIFF_SEGMENT_CD,
+        CUSTOM1_CD,
+        CONSOLIDATION_CD,
+        LEGAL_ENTITY_CD,
+        SCENARIO_CD,
+        SCENARIO_CD_O,
+        ICP_ENTITY_CD,
+        MEASURE_CD,
+        VIEW_CD,
+        FACT_SYSTEM_FLAG,
+        CUSTOM3_CD,
+        ACCOUNT_TYPE,
+        VERSION,
+        KPI_KEY,
+        RUN_ID,
+        KEY_DASHBOARD,
+        inserted_at,
+        source_file,
+        status
+      )
+      VALUES (
+        S.File_Name,
+        S.CALENDAR_MONTH_ID,
+        S.MEASURE_VALUE,
+        S.NUMERATOR_VALUE,
+        S.DENOMINATOR_VALUE,
+        S.CHART_OF_ACCNT_CD,
+        S.TARIFF_SEGMENT_CD,
+        S.CUSTOM1_CD,
+        S.CONSOLIDATION_CD,
+        S.LEGAL_ENTITY_CD,
+        S.SCENARIO_CD,
+        S.SCENARIO_CD_O,
+        S.ICP_ENTITY_CD,
+        S.MEASURE_CD,
+        S.VIEW_CD,
+        S.FACT_SYSTEM_FLAG,
+        S.CUSTOM3_CD,
+        S.ACCOUNT_TYPE,
+        S.VERSION,
+        S.KPI_KEY,
+        S.RUN_ID,
+        S.KEY_DASHBOARD,
+        S.inserted_at,
+        S.source_file,
+        0
+      )
+  """, project_dataset_id, project_dataset_id);
+
+  -- Drop temp tables
+  EXECUTE IMMEDIATE FORMAT("DROP TABLE `%s.temp_cleaned_rolling_forecast`", project_dataset_id);
+  EXECUTE IMMEDIATE FORMAT("DROP TABLE `%s.fact_base_transform_rf_rolling_forecast`", project_dataset_id);
+
+EXCEPTION WHEN ERROR THEN
+  RAISE USING MESSAGE = 'ERROR from script fact_rf: ' || @@error.message || ' and formatted stack trace is: ' || @@error.formatted_stack_trace;
+
+END;
